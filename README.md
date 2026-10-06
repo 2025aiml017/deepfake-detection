@@ -5,12 +5,14 @@ ConvNeXt-Tiny classifier fine-tuned on Celeb-DF v2 scores each face, and the vid
 
 | File | What it is |
 |---|---|
-| `deepfake-video-detection-final-capstone-run-a-run.ipynb` | Final Kaggle notebook: data, training of seven models, evaluation, Run A and Run B |
-| `Deepfake_Detection_Capstone_Project_Report_FINAL_SUBMISSION.docx` | Project report |
-| `Deepfake_Detection_FINAL_Corrected.pptx` | Presentation |
+| `docs/Deepfake_Detection_Capstone_Report.pdf` (and `.docx`) | Project report |
+| `docs/Deepfake_Detection_Capstone_Presentation.pptx` | Presentation |
+| `notebooks/training_and_evaluation.ipynb` | Final Kaggle notebook: data, training of seven models, evaluation, Run A and Run B |
+| `notebooks/requirements.txt` | Packages used by the training notebook |
 | `app.py`, `inference.py` | Streamlit demo app |
 | `models/deepfake_convnext_tiny.pt` | Model used by the app |
 | `scripts/make_app_bundle.py` | How the app's model file was built from the notebook's export |
+| `experiments/lowres_speed.ipynb` | Low-resolution and speed tests (run on Kaggle) |
 
 ## Demo app
 

@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# Local runs of experiments/lowres_speed.py
+experiments/results_local/

@@ -1,0 +1,20 @@
+# Streamlit demo app. Training dependencies are in requirements.txt.txt.
+# On Linux (Streamlit Community Cloud) install the CPU-only PyTorch build:
+# the default PyPI wheel bundles CUDA libraries (several GB) that the app never uses.
+# --find-links (not --extra-index-url) so only torch/torchvision come from the PyTorch
+# server; an extra index would also serve stale copies of certifi, requests, urllib3, ...
+--find-links https://download.pytorch.org/whl/cpu/torch/
+--find-links https://download.pytorch.org/whl/cpu/torchvision/
+torch==2.11.0+cpu ; sys_platform == "linux"
+torch==2.11.0 ; sys_platform != "linux"
+torchvision==0.26.0+cpu ; sys_platform == "linux"
+torchvision==0.26.0 ; sys_platform != "linux"
+
+# Same timm version that trained the checkpoint.
+timm==1.0.11
+onnxruntime==1.30.0
+# OpenCV 4.x matches the training pipeline's face alignment; 5.x is a major release.
+opencv-python-headless==4.14.0.94
+streamlit==1.65.0
+numpy
+pillow

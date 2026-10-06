@@ -1,0 +1,13 @@
+# Local artefacts too large for GitHub (100 MB limit) that the app does not need:
+# the app loads models/deepfake_convnext_tiny.pt, built from the first by scripts/make_app_bundle.py.
+deepfake_convnext_tiny_final.pt
+runs-*.zip
+runs/
+
+# Downloaded automatically on the app's first start
+models/det_10g.onnx
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

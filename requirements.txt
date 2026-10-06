@@ -1,4 +1,4 @@
-# Streamlit demo app. Training dependencies are in requirements.txt.txt.
+# Streamlit demo app. Training dependencies are in notebooks/requirements.txt.
 # On Linux (Streamlit Community Cloud) install the CPU-only PyTorch build:
 # the default PyPI wheel bundles CUDA libraries (several GB) that the app never uses.
 # --find-links (not --extra-index-url) so only torch/torchvision come from the PyTorch

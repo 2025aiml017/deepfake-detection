@@ -16,5 +16,8 @@ onnxruntime==1.30.0
 # OpenCV 4.x matches the training pipeline's face alignment; 5.x is a major release.
 opencv-python-headless==4.14.0.94
 streamlit==1.65.0
+# Static FFmpeg build (with H.264) that converts videos browsers can't play, such as Celeb-DF's MPEG-4 Part 2
+# clips, for the app's preview.
+imageio-ffmpeg==0.6.0
 numpy
 pillow

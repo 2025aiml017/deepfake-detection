@@ -1,21 +1,23 @@
 """Video -> REAL / FAKE: frame sampling, RetinaFace detection, eye alignment and ConvNeXt-Tiny scoring.
 
-Mirrors the training notebook (sections 3 and 10) so the classifier sees faces cropped exactly as in training.
+Mirrors the training notebook (sections 3, 9 and 10) so the classifier sees faces cropped exactly as in training.
 The face detector is insightface's RetinaFace (det_10g.onnx from the buffalo_l pack) run directly with ONNX
 Runtime; the insightface package itself is not needed.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import shutil
 import tempfile
+import threading
 import time
 import urllib.request
 import zipfile
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2
@@ -162,15 +164,35 @@ def align_face(image: np.ndarray, landmarks: np.ndarray, size: int) -> np.ndarra
     return cv2.warpAffine(image, matrix, (size, size), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
 
 
+def to_nchw(tensor: torch.Tensor, model: torch.nn.Module) -> torch.Tensor:
+    """Feature map of a Grad-CAM layer as [N, C, H, W], whatever layout the model uses."""
+    if tensor.ndim == 3:
+        tokens = tensor[:, model.num_prefix_tokens:]
+        side = math.isqrt(tokens.shape[1])
+        return tokens.transpose(1, 2).reshape(len(tensor), -1, side, side)
+    if getattr(model, "output_fmt", "NCHW") == "NHWC":
+        return tensor.permute(0, 3, 1, 2)
+    return tensor
+
+
+def heatmap_overlay(face: np.ndarray, heatmap: np.ndarray, color: tuple[int, int, int] = (235, 104, 52)) -> np.ndarray:
+    """Show a heatmap on an RGB face: dim the face where the heatmap is low and tint it towards `color` where it is
+    high. A tint alone barely shows on skin tones; the dimming makes the hot areas stand out on any face."""
+    heat = heatmap[..., None]
+    lit = face * (0.35 + 0.65 * heat)
+    return (lit * (1 - 0.45 * heat) + np.array(color) * 0.45 * heat).astype(np.uint8)
+
+
 class DeepfakeClassifier:
-    """The exported inference bundle: timm model, preprocessing settings and the video-level threshold."""
+    """The exported inference bundle (timm model, preprocessing settings and the video-level threshold) and the
+    reference file beside it (Grad-CAM layer, calibration and inconclusive range; see scripts/make_reference.py)."""
 
     def __init__(self, bundle_path: Path = MODEL_PATH):
         torch.set_num_threads(NUM_THREADS)
         bundle = torch.load(bundle_path, map_location="cpu", weights_only=True)
         self.model = timm.create_model(bundle["timm_name"], pretrained=False, num_classes=1, **bundle["model_kwargs"])
         self.model.load_state_dict({name: tensor.float() for name, tensor in bundle["state_dict"].items()})
-        self.model.eval()
+        self.model.eval().requires_grad_(False)
         self.name = bundle["model_key"]
         self.threshold = float(bundle["threshold"])
         self.align_size = int(bundle["align_size"])
@@ -181,15 +203,70 @@ class DeepfakeClassifier:
             transforms.Normalize(bundle["mean"], bundle["std"]),
         ])
 
+        reference_path = bundle_path.with_suffix(".json")
+        self.reference = json.loads(reference_path.read_text()) if reference_path.exists() else {}
+        if self.reference and not math.isclose(self.reference["threshold"], self.threshold, abs_tol=1e-6):
+            raise ValueError(f"{reference_path.name} was built for a different model file; rerun make_reference.py")
+        self.calibration = self.reference.get("calibration")
+        self.inconclusive_range = self.reference.get("inconclusive")
+
+    def _batch(self, faces: list[np.ndarray]) -> torch.Tensor:
+        return torch.stack([self.transform(Image.fromarray(face)) for face in faces])
+
     @torch.inference_mode()
     def predict(self, crops: list[np.ndarray], batch_size: int = 16) -> np.ndarray:
         """P(fake) for each BGR face crop."""
         probs = []
         for start in range(0, len(crops), batch_size):
-            batch = torch.stack([self.transform(Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)))
-                                 for crop in crops[start:start + batch_size]])
+            batch = self._batch([cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops[start:start + batch_size]])
             probs.append(torch.sigmoid(self.model(batch)).squeeze(1).numpy())
         return np.concatenate(probs) if probs else np.empty(0, dtype=np.float32)
+
+    def grad_cam(self, faces: list[np.ndarray], batch_size: int = 8) -> list[np.ndarray]:
+        """Grad-CAM of the FAKE logit for each RGB face (notebook section 9): a heatmap of the face's size, scaled
+        to 0-1 per face, that is high where the face pushed the score towards FAKE."""
+        layer = self.model.get_submodule(self.reference["cam_layer"])
+        captured, owner = {}, threading.get_ident()
+
+        def start_graph_here(_module, _inputs, output):
+            # The app shares one model between sessions, each in its own thread: leave their forward passes alone.
+            if threading.get_ident() != owner:
+                return None
+            # The layers before this one run without autograd; gradients are only needed from here on.
+            captured["activation"] = output.detach().requires_grad_(True)
+            return captured["activation"]
+
+        heatmaps = []
+        handle = layer.register_forward_hook(start_graph_here)
+        try:
+            for start in range(0, len(faces), batch_size):
+                chunk = faces[start:start + batch_size]
+                with torch.enable_grad():
+                    logits = self.model(self._batch(chunk))
+                    gradient, = torch.autograd.grad(logits.sum(), captured["activation"])
+                activation = to_nchw(captured["activation"].detach(), self.model)
+                gradient = to_nchw(gradient, self.model)
+                cams = (gradient.mean(dim=(2, 3), keepdim=True) * activation).sum(dim=1).relu().numpy()
+                for cam, face in zip(cams, chunk):
+                    cam = cv2.resize(cam, (face.shape[1], face.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    heatmaps.append((cam - cam.min()) / (cam.max() - cam.min() + 1e-8))
+        finally:
+            handle.remove()
+        return heatmaps
+
+    def calibrated(self, score: float) -> float | None:
+        """P(fake) of a video score after Platt scaling on validation videos, taking real and fake videos as equally
+        likely. None when the reference file has no calibration."""
+        if self.calibration is None or math.isnan(score):
+            return None
+        clip = self.calibration["logit_clip"]
+        score = min(max(score, clip), 1 - clip)
+        z = self.calibration["slope"] * math.log(score / (1 - score)) + self.calibration["intercept"]
+        return 1 / (1 + math.exp(-z))
+
+    def is_inconclusive(self, score: float) -> bool:
+        """True when the score is in the range where both real and fake validation videos scored."""
+        return self.inconclusive_range is not None and self.inconclusive_range[0] <= score <= self.inconclusive_range[1]
 
 
 def frame_indices(n_total: int, count: int) -> np.ndarray:
@@ -270,6 +347,9 @@ class VideoResult:
     crops: list[np.ndarray]  # aligned faces as RGB, for display
     info: VideoInfo
     seconds: float
+    calibrated: float | None = None  # P(fake) after calibration; None without a face or a reference file
+    inconclusive: bool = False  # score in the range where real and fake validation videos overlap
+    no_face_frames: list[int] = field(default_factory=list)  # sampled frames where no face was found
 
 
 def analyse_video(path: Path, detector: FaceDetector, classifier: DeepfakeClassifier, num_frames: int = 32,
@@ -278,7 +358,7 @@ def analyse_video(path: Path, detector: FaceDetector, classifier: DeepfakeClassi
     start = time.perf_counter()
     report = progress or (lambda fraction, message: None)
     info = video_info(path)
-    crops, indices, frames_read = [], [], 0
+    crops, indices, no_face, frames_read = [], [], [], 0
     for index, frame in sample_frames(path, num_frames):
         frames_read += 1
         report(0.9 * min(frames_read / num_frames, 1.0), f"Finding faces: frame {frames_read} of {num_frames}")
@@ -288,6 +368,8 @@ def analyse_video(path: Path, detector: FaceDetector, classifier: DeepfakeClassi
         if crop is not None:
             crops.append(crop)
             indices.append(index)
+        else:
+            no_face.append(index)
     if frames_read == 0:
         raise ValueError("No frames could be read from this video.")
 
@@ -297,4 +379,5 @@ def analyse_video(path: Path, detector: FaceDetector, classifier: DeepfakeClassi
     verdict = "NO FACE" if not len(probs) else ("FAKE" if score >= classifier.threshold else "REAL")
     return VideoResult(verdict, score, classifier.threshold, frames_read, indices, probs.tolist(),
                        [cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops], info,
-                       time.perf_counter() - start)
+                       time.perf_counter() - start, calibrated=classifier.calibrated(score),
+                       inconclusive=classifier.is_inconclusive(score), no_face_frames=sorted(no_face))
